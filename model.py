@@ -127,17 +127,19 @@ class TrainModel(nn.Module):
         input_y = yCbCr.select(1, 0).unsqueeze(1)
         input_op = input_y
         for i in range(self.stage):
-            temp = yCbCr.clone()
-            temp[:, 0, :, :] = input_op
-            inlist.append(yCbCr2rbg(temp))
+            # temp = yCbCr.clone()
+            # temp[:, 0, :, :] = input_op
+            # inlist.append(yCbCr2rbg(temp))
+            inlist.append(input_op)
             i = self.illumination(input_op)
             r = input_y / i
             r = torch.clamp(r, 0, 1)
             att = self.self_calibrate(r)
             input_op = input_y + att
-            temp = yCbCr.clone()
-            temp[:, 0, :, :] = i
-            ilist.append(yCbCr2rbg(temp))
+            # temp = yCbCr.clone()
+            # temp[:, 0, :, :] = i
+            # ilist.append(yCbCr2rbg(temp))
+            ilist.append(i)
             temp = yCbCr.clone()
             temp[:, 0, :, :] = r
             rlist.append(yCbCr2rbg(temp))

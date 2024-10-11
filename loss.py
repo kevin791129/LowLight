@@ -7,18 +7,6 @@ class LossFunction(nn.Module):
         self.l2_loss = nn.MSELoss()
         self.smooth_loss = SmoothLoss()
 
-    def forward(self, input, illu):
-        Fidelity_Loss = self.l2_loss(illu, input)
-        Smooth_Loss = self.smooth_loss(input, illu)
-        return 1.5*Fidelity_Loss + Smooth_Loss
-
-
-
-class SmoothLoss(nn.Module):
-    def __init__(self):
-        super(SmoothLoss, self).__init__()
-        self.sigma = 10
-
     def rgb2yCbCr(self, input_im):
         im_flat = input_im.contiguous().permute((0, 2, 3, 1)).reshape(-1, 3)
         mat = torch.Tensor([[65.481, -37.797, 112.0], [128.553, -74.203, -93.786], [24.966, 112.0, -18.214]]).cuda() / 255.0
@@ -27,10 +15,20 @@ class SmoothLoss(nn.Module):
         out = temp.reshape(input_im.shape[0], input_im.shape[2], input_im.shape[3], 3).permute((0, 3, 1, 2))
         return out
 
+    def forward(self, input, illu):
+        Fidelity_Loss = self.l2_loss(illu, input)
+        Smooth_Loss = self.smooth_loss(input, illu)
+        return 1.5*Fidelity_Loss + Smooth_Loss
+
+class SmoothLoss(nn.Module):
+    def __init__(self):
+        super(SmoothLoss, self).__init__()
+        self.sigma = 10
+
     # output: output      input:input
     def forward(self, input, output):
+        self.input = input
         self.output = output
-        self.input = self.rgb2yCbCr(input)
         sigma_color = -1.0 / (2 * self.sigma * self.sigma)
         w1 = torch.exp(torch.sum(torch.pow(self.input[:, :, 1:, :] - self.input[:, :, :-1, :], 2), dim=1,
                                  keepdim=True) * sigma_color)
