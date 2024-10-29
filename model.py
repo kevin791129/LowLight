@@ -18,6 +18,55 @@ def yCbCr2rbg(input_im):
     out = temp.reshape(input_im.shape[0], input_im.shape[2], input_im.shape[3], 3).permute((0, 3, 1, 2))
     return out
 
+def rgb2hsl(input_im):
+    cmax, cmax_idx = torch.max(input_im, dim=1, keepdim=True)
+    cmin = torch.min(input_im, dim=1, keepdim=True)[0]
+    delta = cmax - cmin
+    hsl_h = torch.empty_like(input_im[:, 0:1, :, :])
+    cmax_idx[delta == 0] = 3
+    hsl_h[cmax_idx == 0] = (((input_im[:, 1:2] - input_im[:, 2:3]) / delta) % 6)[cmax_idx == 0]
+    hsl_h[cmax_idx == 1] = (((input_im[:, 2:3] - input_im[:, 0:1]) / delta) + 2)[cmax_idx == 1]
+    hsl_h[cmax_idx == 2] = (((input_im[:, 0:1] - input_im[:, 1:2]) / delta) + 4)[cmax_idx == 2]
+    hsl_h[cmax_idx == 3] = 0.
+    hsl_h /= 6.
+    hsl_l = (cmax + cmin) / 2.
+    hsl_s = torch.empty_like(hsl_h).cuda()
+    hsl_s[hsl_l == 0] = 0
+    hsl_s[hsl_l == 1] = 0
+    hsl_l_ma = torch.bitwise_and(hsl_l > 0, hsl_l < 1)
+    hsl_l_s0_5 = torch.bitwise_and(hsl_l_ma, hsl_l <= 0.5)
+    hsl_l_l0_5 = torch.bitwise_and(hsl_l_ma, hsl_l > 0.5)
+    hsl_s[hsl_l_s0_5] = ((cmax - cmin) / (hsl_l * 2.))[hsl_l_s0_5]
+    hsl_s[hsl_l_l0_5] = ((cmax - cmin) / (- hsl_l * 2. + 2.))[hsl_l_l0_5]
+    return torch.cat([hsl_h, hsl_s, hsl_l], dim=1)
+
+def hsl2rgb(input_im):
+    hsl_h, hsl_s, hsl_l = input_im[:, 0:1], input_im[:, 1:2], input_im[:, 2:3]
+    _c = (-torch.abs(hsl_l * 2. - 1.) + 1) * hsl_s
+    _x = _c * (-torch.abs(hsl_h * 6. % 2. - 1) + 1.)
+    _m = hsl_l - _c / 2.
+    idx = (hsl_h * 6.).type(torch.uint8)
+    idx = (idx % 6).expand(-1, 3, -1, -1)
+    rgb = torch.empty_like(input_im).cuda()
+    _o = torch.zeros_like(_c).cuda()
+    rgb[idx == 0] = torch.cat([_c, _x, _o], dim=1)[idx == 0]
+    rgb[idx == 1] = torch.cat([_x, _c, _o], dim=1)[idx == 1]
+    rgb[idx == 2] = torch.cat([_o, _c, _x], dim=1)[idx == 2]
+    rgb[idx == 3] = torch.cat([_o, _x, _c], dim=1)[idx == 3]
+    rgb[idx == 4] = torch.cat([_x, _o, _c], dim=1)[idx == 4]
+    rgb[idx == 5] = torch.cat([_c, _o, _x], dim=1)[idx == 5]
+    rgb += _m
+    return rgb
+
+def hue_correction(enhanced, original):
+    aw = enhanced.min(dim=1)[0]
+    ac = enhanced.max(dim=1)[0] - aw
+    original_max = original.max(dim=1)[0]
+    original_min = original.min(dim=1)[0]
+    original_diff = original_max - original_min
+    c = ((original - original_min) / original_diff).nan_to_num()
+    return torch.clamp(aw + ac * c, 0, 1)
+    
 class IlluminationNetwork(nn.Module):
     def __init__(self, layers, channels):
         super(IlluminationNetwork, self).__init__()
@@ -103,14 +152,17 @@ class SelfCalibrateNetwork(nn.Module):
 
 class TrainModel(nn.Module):
 
-    def __init__(self, stage=3):
+    def __init__(self, stage=3, color_format="rgb", apply_correction=True):
         super(TrainModel, self).__init__()
         self.stage = stage
         self.illumination = IlluminationNetwork(layers=1, channels=3)
         self.self_calibrate = SelfCalibrateNetwork(layers=3, channels=16)
         self._criterion = LossFunction()
-        self.rgb2yCbCr = rgb2yCbCr
-        self.yCbCr2rbg = yCbCr2rbg
+        self.rgb2other = rgb2hsl if color_format.lower() == "hsl" else rgb2yCbCr
+        self.other2rbg = hsl2rgb if color_format.lower() == "hsl" else yCbCr2rbg
+        self.channel = 2 if color_format.lower() == "hsl" else 0
+        self.hue_correction = hue_correction
+        self.apply_correction = apply_correction
 
     def weights_init(self, m):
         if isinstance(m, nn.Conv2d):
@@ -123,26 +175,20 @@ class TrainModel(nn.Module):
     def forward(self, input):
 
         ilist, rlist, inlist, attlist = [], [], [], []
-        yCbCr = self.rgb2yCbCr(input)
-        input_y = yCbCr.select(1, 0).unsqueeze(1)
-        input_op = input_y
+        color = self.rgb2other(input)
+        input_channel = color.select(1, self.channel).unsqueeze(1)
+        input_op = input_channel
         for i in range(self.stage):
-            # temp = yCbCr.clone()
-            # temp[:, 0, :, :] = input_op
-            # inlist.append(yCbCr2rbg(temp))
             inlist.append(input_op)
             i = self.illumination(input_op)
-            r = input_y / i
+            r = input_channel / i
             r = torch.clamp(r, 0, 1)
             att = self.self_calibrate(r)
-            input_op = input_y + att
-            # temp = yCbCr.clone()
-            # temp[:, 0, :, :] = i
-            # ilist.append(yCbCr2rbg(temp))
+            input_op = input_channel + att
             ilist.append(i)
-            temp = yCbCr.clone()
-            temp[:, 0, :, :] = r
-            rlist.append(yCbCr2rbg(temp))
+            temp = color.clone()
+            temp[:, self.channel, :, :] = r
+            rlist.append(self.hue_correction(self.other2rbg(temp), input) if self.apply_correction else self.other2rbg(temp))
             attlist.append(torch.abs(att))
 
         return ilist, rlist, inlist, attlist
@@ -155,15 +201,17 @@ class TrainModel(nn.Module):
         return loss
 
 
-
 class PredictModel(nn.Module):
 
-    def __init__(self, weights):
+    def __init__(self, weights, color_format="rgb", apply_correction=True):
         super(PredictModel, self).__init__()
         self.illumination = IlluminationNetwork(layers=1, channels=3)
         self._criterion = LossFunction()
-        self.rgb2yCbCr = rgb2yCbCr
-        self.yCbCr2rbg = yCbCr2rbg
+        self.rgb2other = rgb2hsl if color_format.lower() == "hsl" else rgb2yCbCr
+        self.other2rbg = hsl2rgb if color_format.lower() == "hsl" else yCbCr2rbg
+        self.channel = 2 if color_format.lower() == "hsl" else 0
+        self.hue_correction = hue_correction
+        self.apply_correction = apply_correction
 
         base_weights = torch.load(weights)
         pretrained_dict = base_weights
@@ -181,18 +229,15 @@ class PredictModel(nn.Module):
             m.weight.data.normal_(1., 0.02)
 
     def forward(self, input):
-        yCbCr = self.rgb2yCbCr(input)
-        input_y = yCbCr.select(1, 0).unsqueeze(1)
-        i = self.illumination(input_y)
-        r = input_y / i
+        color = self.rgb2other(input)
+        input_channel = color.select(1, self.channel).unsqueeze(1)
+        i = self.illumination(input_channel)
+        r = input_channel / i
         r = torch.clamp(r, 0, 1)
-        temp = yCbCr
-        temp[:, 0, :, :] = r
-        return i, yCbCr2rbg(temp)
-
+        color[:, self.channel, :, :] = r
+        return i, self.hue_correction(self.other2rbg(color), input) if self.apply_correction else self.other2rbg(color)
 
     def _loss(self, input):
         i, r = self(input)
         loss = self._criterion(input, i)
         return loss
-
