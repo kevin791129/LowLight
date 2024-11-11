@@ -59,10 +59,10 @@ def hsl2rgb(input_im):
     return rgb
 
 def hue_correction(enhanced, original):
-    aw = enhanced.min(dim=1)[0]
-    ac = enhanced.max(dim=1)[0] - aw
-    original_max = original.max(dim=1)[0]
-    original_min = original.min(dim=1)[0]
+    aw = enhanced.min(dim=1)[0].unsqueeze(1)
+    ac = enhanced.max(dim=1)[0].unsqueeze(1) - aw
+    original_max = original.max(dim=1)[0].unsqueeze(1)
+    original_min = original.min(dim=1)[0].unsqueeze(1)
     original_diff = original_max - original_min
     c = ((original - original_min) / original_diff).nan_to_num()
     return torch.clamp(aw + ac * c, 0, 1)
@@ -152,7 +152,7 @@ class SelfCalibrateNetwork(nn.Module):
 
 class TrainModel(nn.Module):
 
-    def __init__(self, stage=3, color_format="rgb", apply_correction=True):
+    def __init__(self, stage=3, color_format="rgb"):
         super(TrainModel, self).__init__()
         self.stage = stage
         self.illumination = IlluminationNetwork(layers=1, channels=3)
@@ -162,7 +162,6 @@ class TrainModel(nn.Module):
         self.other2rbg = hsl2rgb if color_format.lower() == "hsl" else yCbCr2rbg
         self.channel = 2 if color_format.lower() == "hsl" else 0
         self.hue_correction = hue_correction
-        self.apply_correction = apply_correction
 
     def weights_init(self, m):
         if isinstance(m, nn.Conv2d):
@@ -187,8 +186,9 @@ class TrainModel(nn.Module):
             input_op = input_channel + att
             ilist.append(i)
             temp = color.clone()
-            temp[:, self.channel, :, :] = r
-            rlist.append(self.hue_correction(self.other2rbg(temp), input) if self.apply_correction else self.other2rbg(temp))
+            temp[:, self.channel:self.channel+1, :, :] = r
+            temp = self.other2rbg(temp)
+            rlist.append((temp, self.hue_correction(temp, input)))
             attlist.append(torch.abs(att))
 
         return ilist, rlist, inlist, attlist
@@ -203,7 +203,7 @@ class TrainModel(nn.Module):
 
 class PredictModel(nn.Module):
 
-    def __init__(self, weights, color_format="rgb", apply_correction=True):
+    def __init__(self, weights, color_format="rgb"):
         super(PredictModel, self).__init__()
         self.illumination = IlluminationNetwork(layers=1, channels=3)
         self._criterion = LossFunction()
@@ -211,7 +211,6 @@ class PredictModel(nn.Module):
         self.other2rbg = hsl2rgb if color_format.lower() == "hsl" else yCbCr2rbg
         self.channel = 2 if color_format.lower() == "hsl" else 0
         self.hue_correction = hue_correction
-        self.apply_correction = apply_correction
 
         base_weights = torch.load(weights)
         pretrained_dict = base_weights
@@ -234,10 +233,11 @@ class PredictModel(nn.Module):
         i = self.illumination(input_channel)
         r = input_channel / i
         r = torch.clamp(r, 0, 1)
-        color[:, self.channel, :, :] = r
-        return i, self.hue_correction(self.other2rbg(color), input) if self.apply_correction else self.other2rbg(color)
+        color[:, self.channel:self.channel+1, :, :] = r
+        color = self.other2rbg(color)
+        return i, (color, self.hue_correction(color, input))
 
     def _loss(self, input):
-        i, r = self(input)
+        i, _ = self(input)
         loss = self._criterion(input, i)
         return loss
