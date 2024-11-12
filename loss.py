@@ -15,10 +15,11 @@ class LossFunction(nn.Module):
         out = temp.reshape(input_im.shape[0], input_im.shape[2], input_im.shape[3], 3).permute((0, 3, 1, 2))
         return out
 
-    def forward(self, input, illu):
+    def forward(self, input, illu, reflect):
         Fidelity_Loss = self.l2_loss(illu, input)
         Smooth_Loss = self.smooth_loss(input, illu)
-        return 1.5*Fidelity_Loss + Smooth_Loss
+        Hue_Loss = self.l2_loss(reflect[1], reflect[0])
+        return Fidelity_Loss + Smooth_Loss + Hue_Loss
 
 class SmoothLoss(nn.Module):
     def __init__(self):
