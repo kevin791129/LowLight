@@ -152,13 +152,12 @@ class SelfCalibrateNetwork(nn.Module):
 
 class TrainModel(nn.Module):
 
-    def __init__(self, stage=3):
+    def __init__(self, stage=3, loss_weights=(1.5, 1, 1)):
         super(TrainModel, self).__init__()
         self.stage = stage
         self.illumination = IlluminationNetwork(layers=1, channels=3)
         self.self_calibrate = SelfCalibrateNetwork(layers=3, channels=16)
-        self._criterion = LossFunction()
-        self.hue_correction = hue_correction
+        self._criterion = LossFunction(loss_weights)
 
     def weights_init(self, m):
         if isinstance(m, nn.Conv2d):
@@ -175,7 +174,7 @@ class TrainModel(nn.Module):
         input_channel = color.select(1, 2).unsqueeze(1)
         input_op = input_channel
         for i in range(self.stage):
-            input_y_channel = rgb2yCbCr(input if len(rlist) == 0 else rlist[-1][0]).select(1, 0).unsqueeze(1)  
+            input_y_channel = rgb2yCbCr(input if len(rlist) == 0 else rlist[-1]).select(1, 0).unsqueeze(1)
             inlist.append(input_op)
             illu_input = torch.cat((input_op, input_y_channel), 1)
             i = self.illumination(illu_input)
@@ -187,7 +186,7 @@ class TrainModel(nn.Module):
             temp = color.clone()
             temp[:, [2], :, :] = r
             temp = hsl2rgb(temp)
-            rlist.append((temp, self.hue_correction(temp, input)))
+            rlist.append(temp)
             attlist.append(torch.abs(att))
 
         return ilist, rlist, inlist, attlist
@@ -196,7 +195,7 @@ class TrainModel(nn.Module):
         i_list, r_list, in_list, _ = self(input)
         loss = 0
         for i in range(self.stage):
-            loss += self._criterion(in_list[i], i_list[i], r_list[i])
+            loss += self._criterion(in_list[i], i_list[i], r_list[i], input)
         return loss
 
 
@@ -205,7 +204,6 @@ class PredictModel(nn.Module):
     def __init__(self, weights):
         super(PredictModel, self).__init__()
         self.illumination = IlluminationNetwork(layers=1, channels=3)
-        self.hue_correction = hue_correction
 
         base_weights = torch.load(weights)
         pretrained_dict = base_weights
@@ -231,4 +229,4 @@ class PredictModel(nn.Module):
         r = torch.clamp(r, 0, 1)
         color[:, [2], :, :] = r
         color = hsl2rgb(color)
-        return i, (color, self.hue_correction(color, input))
+        return i, color

@@ -2,24 +2,26 @@ import torch
 import torch.nn as nn
 
 class LossFunction(nn.Module):
-    def __init__(self):
+    def __init__(self, weights):
         super(LossFunction, self).__init__()
         self.l2_loss = nn.MSELoss()
         self.smooth_loss = SmoothLoss()
+        self.weights = weights
 
-    def rgb2yCbCr(self, input_im):
-        im_flat = input_im.contiguous().permute((0, 2, 3, 1)).reshape(-1, 3)
-        mat = torch.Tensor([[65.481, -37.797, 112.0], [128.553, -74.203, -93.786], [24.966, 112.0, -18.214]]).cuda() / 255.0
-        bias = torch.Tensor([16.0, 128.0, 128.0]).cuda() / 255.0
-        temp = im_flat.mm(mat) + bias
-        out = temp.reshape(input_im.shape[0], input_im.shape[2], input_im.shape[3], 3).permute((0, 3, 1, 2))
-        return out
+    def hue_correction(self, enhanced, original):
+        aw = enhanced.min(dim=1)[0].unsqueeze(1)
+        ac = enhanced.max(dim=1)[0].unsqueeze(1) - aw
+        original_max = original.max(dim=1)[0].unsqueeze(1)
+        original_min = original.min(dim=1)[0].unsqueeze(1)
+        original_diff = original_max - original_min
+        c = ((original - original_min) / original_diff).nan_to_num()
+        return torch.clamp(aw + ac * c, 0, 1)
 
-    def forward(self, input, illu, reflect):
+    def forward(self, input, illu, reflect, input_raw):
         Fidelity_Loss = self.l2_loss(illu, input)
         Smooth_Loss = self.smooth_loss(input, illu)
-        Hue_Loss = self.l2_loss(reflect[1], reflect[0])
-        return Fidelity_Loss + Smooth_Loss + Hue_Loss
+        Hue_Loss = self.l2_loss(self.hue_correction(reflect, input_raw), reflect)
+        return self.weights[0] * Fidelity_Loss + self.weights[1] * Smooth_Loss + self.weights[2] * Hue_Loss
 
 class SmoothLoss(nn.Module):
     def __init__(self):
