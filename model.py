@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from loss import LossFunction
 
+
 def rgb2yCbCr(input_im):
     im_flat = input_im.contiguous().permute((0, 2, 3, 1)).reshape(-1, 3)
     mat = torch.Tensor([[65.481, -37.797, 112.0], [128.553, -74.203, -93.786], [24.966, 112.0, -18.214]]).cuda() / 255.0
@@ -58,17 +59,9 @@ def hsl2rgb(input_im):
     rgb += _m
     return rgb
 
-def hue_correction(enhanced, original):
-    aw = enhanced.min(dim=1)[0].unsqueeze(1)
-    ac = enhanced.max(dim=1)[0].unsqueeze(1) - aw
-    original_max = original.max(dim=1)[0].unsqueeze(1)
-    original_min = original.min(dim=1)[0].unsqueeze(1)
-    original_diff = original_max - original_min
-    c = ((original - original_min) / original_diff).nan_to_num()
-    return torch.clamp(aw + ac * c, 0, 1)
     
 class IlluminationNetwork(nn.Module):
-    def __init__(self, layers, channels):
+    def __init__(self, layers, channels, in_channels=1):
         super(IlluminationNetwork, self).__init__()
 
         kernel_size = 3
@@ -76,7 +69,7 @@ class IlluminationNetwork(nn.Module):
         padding = int((kernel_size - 1) / 2) * dilation
 
         self.in_conv = nn.Sequential(
-            nn.Conv2d(in_channels=2, out_channels=channels, kernel_size=kernel_size, stride=1, padding=padding),
+            nn.Conv2d(in_channels=in_channels, out_channels=channels, kernel_size=kernel_size, stride=1, padding=padding),
             nn.ReLU()
         )
 
@@ -152,12 +145,17 @@ class SelfCalibrateNetwork(nn.Module):
 
 class TrainModel(nn.Module):
 
-    def __init__(self, stage=3, loss_weights=(1.5, 1, 1)):
+    def __init__(self, stage=3, color="hsl", in_channels=1, loss_weights=(1.5, 1, 1)):
         super(TrainModel, self).__init__()
         self.stage = stage
-        self.illumination = IlluminationNetwork(layers=1, channels=3)
+        self.color = "ycbcr" if color.lower() == "ycbcr" else "hsl"
+        self.in_channels = in_channels
+        self.illumination = IlluminationNetwork(layers=1, channels=3, in_channels=in_channels)
         self.self_calibrate = SelfCalibrateNetwork(layers=3, channels=16)
         self._criterion = LossFunction(loss_weights)
+        self.rgb2other = rgb2hsl if self.color == "hsl" else rgb2yCbCr
+        self.other2rbg = hsl2rgb if self.color == "hsl" else yCbCr2rbg
+        self.channel_idx = 2 if self.color == "hsl" else 0
 
     def weights_init(self, m):
         if isinstance(m, nn.Conv2d):
@@ -168,15 +166,20 @@ class TrainModel(nn.Module):
             m.weight.data.normal_(1., 0.02)
 
     def forward(self, input):
-
         ilist, rlist, inlist, attlist = [], [], [], []
-        color = rgb2hsl(input)
-        input_channel = color.select(1, 2).unsqueeze(1)
+        color = self.rgb2other(input)
+        input_channel = color.select(1, self.channel_idx).unsqueeze(1)
         input_op = input_channel
         for i in range(self.stage):
-            input_y_channel = rgb2yCbCr(input if len(rlist) == 0 else rlist[-1]).select(1, 0).unsqueeze(1)
+            if self.in_channels > 1:
+                if self.color == "hsl":
+                    input_other_channel = rgb2yCbCr(input if len(rlist) == 0 else rlist[-1]).select(1, 0).unsqueeze(1)
+                else:
+                    input_other_channel = rgb2hsl(input if len(rlist) == 0 else rlist[-1]).select(1, 2).unsqueeze(1)
+                illu_input = torch.cat((input_op, input_other_channel), 1)
+            else:
+                illu_input = input_op
             inlist.append(input_op)
-            illu_input = torch.cat((input_op, input_y_channel), 1)
             i = self.illumination(illu_input)
             r = input_channel / i
             r = torch.clamp(r, 0, 1)
@@ -184,8 +187,8 @@ class TrainModel(nn.Module):
             input_op = input_channel + att
             ilist.append(i)
             temp = color.clone()
-            temp[:, [2], :, :] = r
-            temp = hsl2rgb(temp)
+            temp[:, [self.channel_idx], :, :] = r
+            temp = self.other2rbg(temp)
             rlist.append(temp)
             attlist.append(torch.abs(att))
 
@@ -201,9 +204,14 @@ class TrainModel(nn.Module):
 
 class PredictModel(nn.Module):
 
-    def __init__(self, weights):
+    def __init__(self, weights, color="hsl", in_channels=1):
         super(PredictModel, self).__init__()
-        self.illumination = IlluminationNetwork(layers=1, channels=3)
+        self.color = "ycbcr" if color.lower() == "ycbcr" else "hsl"
+        self.in_channels = in_channels
+        self.illumination = IlluminationNetwork(layers=1, channels=3, in_channels=in_channels)
+        self.rgb2other = rgb2hsl if self.color == "hsl" else rgb2yCbCr
+        self.other2rbg = hsl2rgb if self.color == "hsl" else yCbCr2rbg
+        self.channel_idx = 2 if self.color == "hsl" else 0
 
         base_weights = torch.load(weights)
         pretrained_dict = base_weights
@@ -221,12 +229,19 @@ class PredictModel(nn.Module):
             m.weight.data.normal_(1., 0.02)
 
     def forward(self, input):
-        color = rgb2hsl(input)
-        input_channel = color.select(1, 2).unsqueeze(1)
-        input_y_channel = rgb2yCbCr(input).select(1, 0).unsqueeze(1)  
-        i = self.illumination(torch.cat((input_channel, input_y_channel), 1))
+        color = self.rgb2other(input)
+        input_channel = color.select(1, self.channel_idx).unsqueeze(1)
+        if self.in_channels > 1:
+            if self.color == "hsl":
+                input_other_channel = rgb2yCbCr(input).select(1, 0).unsqueeze(1) 
+            else:
+                input_other_channel = rgb2hsl(input).select(1, 2).unsqueeze(1) 
+            illu_input = torch.cat((input_channel, input_other_channel), 1)
+        else:
+            illu_input = input_channel
+        i = self.illumination(illu_input)
         r = input_channel / i
         r = torch.clamp(r, 0, 1)
-        color[:, [2], :, :] = r
-        color = hsl2rgb(color)
+        color[:, [self.channel_idx], :, :] = r
+        color = self.other2rbg(color)
         return i, color
