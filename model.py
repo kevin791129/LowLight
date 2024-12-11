@@ -23,7 +23,7 @@ def rgb2hsl(input_im):
     cmax, cmax_idx = torch.max(input_im, dim=1, keepdim=True)
     cmin = torch.min(input_im, dim=1, keepdim=True)[0]
     delta = cmax - cmin
-    hsl_h = torch.empty_like(input_im[:, 0:1, :, :])
+    hsl_h = torch.empty_like(input_im[:, 0:1, :, :]).cuda()
     cmax_idx[delta == 0] = 3
     hsl_h[cmax_idx == 0] = (((input_im[:, 1:2] - input_im[:, 2:3]) / delta) % 6)[cmax_idx == 0]
     hsl_h[cmax_idx == 1] = (((input_im[:, 2:3] - input_im[:, 0:1]) / delta) + 2)[cmax_idx == 1]
@@ -63,7 +63,6 @@ def hsl2rgb(input_im):
 class IlluminationNetwork(nn.Module):
     def __init__(self, layers, channels, in_channels=1):
         super(IlluminationNetwork, self).__init__()
-
         kernel_size = 3
         dilation = 1
         padding = int((kernel_size - 1) / 2) * dilation
@@ -94,7 +93,7 @@ class IlluminationNetwork(nn.Module):
             fea = fea + conv(fea)
         fea = self.out_conv(fea)
 
-        illu = fea + input
+        illu = fea + input[:, [0], :, :]
         illu = torch.clamp(illu, 0.0001, 1)
 
         return illu
@@ -122,6 +121,7 @@ class SelfCalibrateNetwork(nn.Module):
             nn.BatchNorm2d(channels),
             nn.ReLU()
         )
+
         self.blocks = nn.ModuleList()
         for i in range(layers):
             self.blocks.append(self.convs)
